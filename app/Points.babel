@@ -1,0 +1,316 @@
+// Points + leaderboard.
+// Score = your BEST result in each of the 11 marked games (twelve in all; Aunties Against Everyone is for honour), added up. Each game is capped at 1,000, except The Great Migration and Keep it cold (arcade, no cap).
+// Live board: set window.LSD_CONFIG.leaderboardUrl (see docs/leaderboard-api.md). Without it the board
+// holds the signed-in student on this device only. No invented students, no ticker.
+const PT_GAMES = ['game-02', 'game-03', 'game-04', 'game-05', 'game-07', 'game-08', 'game-09', 'game-14', 'game-11', 'game-12', 'game-13'];
+const PT_TOTAL = PT_GAMES.length * 1000;
+const PT_RULES = {
+  'game-02': ['Spot the Vaalie', 'Find all five, few false reports, fast. Speed counts.'],
+  'game-03': ['Eish / No Laka', '45 per right answer, minus 15 per wrong one. Capped at 1,000. Guessing gets about 350 marks.'],
+  'game-04': ['Durdle', 'Fewer tries and a faster solve, more marks. One word a day, one go a day.'],
+  'game-05': ['Pack for Durban', 'A clean pack, packed fast. Speed counts.'],
+  'game-07': ['The braai clock', 'Six guesses. Up to 400 for asking. The longer you wait, the less the braai respects you.'],
+  'game-08': ['Fork patrol', '20 per fork confiscated. 50 forks gets you the full 1,000. No clock: the shift lasts until a fork gets through.'],
+  'game-09': ['The Great Migration', 'Arcade rules, no cap. 10 per metre flown. 100 per mango, litchi, slops, pineapple, soft serve, watermelon, beach ball or coconut; 500 per flamingo; 250 per music note. Pickups are multiplied by your speed level (1 to 5) and your combo: five in a row ups it, up to ×8. Hit the work and you lose a heart, your combo and 300 × speed level. Granadilla lolly: four seconds untouchable, 250 × speed level per piece of work smashed. +5,000 through the Moses Mabhida arch, +2,500 per heart left, +10,000 for landing without a wobble. Three wobbles and you’re grounded: you keep the score.'],
+  'game-14': ['Keep it cold', 'Arcade rules, no cap. Marks every second you last, and the rate climbs with the heat. Ice the hottest thing first for a combo, up to ×4. Bonuses for close ones, shooing seagulls and slapping small hands. Three hearts.'],
+  'game-12': ['Lost & Found', '100 per word found. All eight: plus up to 200 for speed. One go a day.'],
+  'game-13': ['The Deck Chair', '700 for handing it in, plus up to 300 for speed, minus 25 per wrong letter. One go a day.'],
+  'game-11': ['Snap, ekse', '50 per pair (400). Plus up to 600 for time: 600 at 45 seconds, down to 0 at 150. Minus 10 per wrong pair. Never below 400.'],
+};
+const PT_MAX = 1000;
+const ptsFmt = n => Math.round(+n || 0).toLocaleString('en-US');
+const PT_CAP = { 'game-09': Infinity, 'game-14': Infinity }; // arcade games: no cap
+const ptsClamp = (n, id) => Math.max(0, Math.min(PT_CAP[id] || PT_MAX, Math.round(+n || 0)));
+const lbCfg = () => window.LSD_CONFIG || {};
+
+function readPoints() { try { const p = JSON.parse(localStorage.getItem(lsdKey('lsd2-points'))) || {}; const o = {}; PT_GAMES.forEach(g => { if (p[g]) o[g] = ptsClamp(p[g], g); }); return o; } catch (e) { return {}; } }
+const pointsTotal = p => PT_GAMES.reduce((s, g) => s + ptsClamp((p || {})[g], g), 0);
+function lbPlayer() {
+  try { const s = JSON.parse(localStorage.getItem('lsd2-session')); const p = s && (JSON.parse(localStorage.getItem('lsd2-profiles')) || {})[s]; return p ? { id: 'p_' + codeHash(p.email), username: p.username || ('student' + codeHash(p.email).slice(0, 4)), location: p.location || '' } : null; } catch (e) { return null; }
+}
+function awardGame(id, pts) {
+  if (!PT_GAMES.includes(id)) return { prev: 0, isBest: false };
+  const v = ptsClamp(pts, id), p = readPoints(), prev = p[id] || 0, isBest = v > prev;
+  if (isBest) { p[id] = v; try { localStorage.setItem(lsdKey('lsd2-points'), JSON.stringify(p)); } catch (e) {} setTimeout(() => window.dispatchEvent(new CustomEvent('lsd2-store', { detail: { key: 'lsd2-points', n: p } })), 0); }
+  const url = lbCfg().leaderboardUrl, me = lbPlayer();
+  if (url && me) fetch(url.replace(/\/$/, '') + '/scores', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ player: me, game: id, points: v, ts: Date.now() }) })
+    .then(() => window.dispatchEvent(new Event('lsd2-scored'))).catch(() => {});
+  return { prev, isBest };
+}
+
+function useBoard() {
+  const cfg = lbCfg(), url = (cfg.leaderboardUrl || '').replace(/\/$/, '');
+  const mode = url ? 'live' : 'local'; // no invented students, ever: without a score server the board holds this device's students only
+  const [, force] = React.useState(0);
+  const [remote, setRemote] = React.useState(window.__lsdRemote || null);
+  const [pointsS] = useStored('lsd2-points', {});
+  const [session] = useStored('lsd2-session', null);
+  const me = useProfile();
+  // Read straight from storage too: a round filed during this render pass (ScoreBanner) must count in the position it shows.
+  const fresh = readPoints(), points = pointsTotal(fresh) >= pointsTotal(pointsS) ? { ...pointsS, ...fresh } : pointsS;
+  React.useEffect(() => {
+    if (mode !== 'live') return; const pl = lbPlayer(); let stop = false;
+    const load = () => fetch(url + '/board?player=' + encodeURIComponent(pl ? pl.id : '')).then(r => r.json()).then(d => { if (!stop) { window.__lsdRemote = d; setRemote(d); } }).catch(() => {});
+    load(); const t = setInterval(load, 15000); addEventListener('lsd2-scored', load);
+    return () => { stop = true; clearInterval(t); removeEventListener('lsd2-scored', load); };
+  }, [mode, url, session]);
+  const mine = pointsTotal(points || {});
+  const name = me ? (me.username || ('student' + codeHash(me.email).slice(0, 4))) : 'You', from = (me && me.location) || '';
+  // Every consumer gets the same shape whatever the board holds: top + near are arrays (maybe empty), you.pos is a number or null
+  // (null = not on the board yet), total is a count, empty says there is nobody on it at all.
+  if (mode === 'live') {
+    const d = remote || {}, list = v => Array.isArray(v) ? v : [], map = r => ({ id: r.id, name: r.username || r.name || 'student', from: r.location || '', pts: +r.points || 0, pos: +r.pos || null, you: !!(d.you && r.id === d.you.id) });
+    const top = list(d.top).map(map), near = list(d.near).map(map);
+    const pts = Math.max(mine, d.you ? +d.you.points || 0 : 0);
+    const you = { id: 'you', you: true, name, from, pts, pos: d.you && +d.you.pos ? +d.you.pos : pts ? top.length + 1 : null };
+    const all = [...top, ...near], ahead = you.pos ? all.find(r => r.pos === you.pos - 1) : undefined;
+    const feed = list(d.feed).map(f => ({ t: f.ts, name: f.username || f.name, from: f.location, add: f.points, g: (PT_RULES[f.game] || [f.game])[0] }));
+    return { mode, top, near: you.pos && you.pos > top.length ? near : [], you, ahead, total: +d.total || all.length || (pts ? 1 : 0), feed, points: points || {}, ready: !!remote, empty: !top.length && !pts };
+  }
+  // Local board: the signed-in student only, and only once they have marks. Logged-out and replaced profiles leave the board (no ghosts).
+  const you = { id: 'you', you: true, name, from, tag: 'This device', pts: mine, pos: mine ? 1 : null };
+  const top = you.pos ? [you] : [];
+  return { mode, top, near: [], you, ahead: undefined, total: top.length, feed: [], points: points || {}, ready: true, empty: !top.length };
+}
+
+// Speed counts in every game. The clock starts on your first move and stops the moment you finish.
+// Untimed-by-nature games (Spot the Vaalie, Pack for Durban, the braai clock): marks = accuracy × (0.7 + 0.3 × speed), speed 1 = fast, 0 = slow.
+// Time spent in another tab or app (sharing, a WhatsApp, a call) doesn't count against you.
+function useGameClock() {
+  const [t0, setT0] = React.useState(null), [t1, setT1] = React.useState(null), [, tick] = React.useState(0);
+  const off = React.useRef({ ms: 0, at: null });
+  const settle = () => { const o = off.current; if (o.at) { o.ms += Date.now() - o.at; o.at = null; } };
+  React.useEffect(() => {
+    if (!t0 || t1) return; const i = setInterval(() => tick(x => x + 1), 250);
+    const v = () => { if (document.hidden) off.current.at = off.current.at || Date.now(); else settle(); };
+    document.addEventListener('visibilitychange', v); return () => { clearInterval(i); document.removeEventListener('visibilitychange', v); };
+  }, [t0, t1]);
+  const o = off.current, hid = o.ms + (o.at ? Date.now() - o.at : 0);
+  return { secs: t0 ? Math.max(0, ((t1 || Date.now()) - t0 - hid) / 1000) : 0, started: !!t0, running: !!t0 && !t1, start: () => setT0(t => t || Date.now()), stop: () => { settle(); setT1(t => t || Date.now()); }, reset: () => { off.current = { ms: 0, at: null }; setT0(null); setT1(null); } };
+}
+// Real-time games pause when their play area is mostly scrolled out of view (phones scroll mid-game), the same as leaving the tab.
+// A short grace after starting lets the auto-scroll land first.
+function useOffscreenPause(ref, active, onPause, min = 0.6) {
+  const cb = React.useRef(onPause); cb.current = onPause;
+  React.useEffect(() => {
+    if (!active) return;
+    const t0 = performance.now(); let raf = 0;
+    const chk = () => { raf = 0; const el = ref.current; if (!el || performance.now() - t0 < 1200) return; const r = el.getBoundingClientRect(), seen = Math.min(r.bottom, innerHeight) - Math.max(r.top, 0); if (seen / Math.max(1, Math.min(r.height, innerHeight)) < min) cb.current(); };
+    const on = () => { if (!raf) raf = requestAnimationFrame(chk); };
+    addEventListener('scroll', on, { passive: true }); addEventListener('resize', on);
+    return () => { removeEventListener('scroll', on); removeEventListener('resize', on); cancelAnimationFrame(raf); };
+  }, [active]);
+}
+// Bring a game's play area into view (replays start from the bottom of the results on phones).
+function lsdBringIntoView(el) { if (!el) return; const r = el.getBoundingClientRect(); window.scrollTo({ top: Math.max(0, scrollY + r.top - Math.max(72, (innerHeight - r.height) / 2)), behavior: 'smooth' }); }
+// Start screen for timed games: nothing to read until the clock is running. No cheesing it.
+// How to play: shown on every game’s start screen, before the clock starts. The Great Migration and Keep it cold carry their own.
+const HOW = {
+  'game-02': [['Read', 'A Durban beach, in writing. Five vaalies are hiding among the locals.'], ['Tap', 'Tap the giveaway word, not the person. Socks with sandals, that sort of thing.'], ['Careful', 'Every false report costs 100. So does dawdling.'], ['Score', 'Up to 1,000. Find all five fast with no false reports.']],
+  'game-03': [['Read', 'A statement about Durban appears. True or false?'], ['Agree', ltsdTouch() ? 'Hit No laka. Yes, no laka means yes.' : 'Hit No laka, or press J. Yes, no laka means yes.'], ['Disagree', ltsdTouch() ? 'Hit Eish, no.' : 'Hit Eish, no, or press N.'], ['Score', '45 seconds. +45 a right answer, −15 a wrong one. Finish early for a bonus.']],
+  'game-04': [['Guess', ltsdTouch() ? 'A five-letter word, six tries. Tap the keys.' : 'A five-letter word, six tries. Type it or use the keys.'], ['Orange', 'Right letter, right spot.'], ['Highlight', 'Right letter, wrong spot. Grey: not in the word.'], ['Daily', 'One word a day, one go. Fewer tries and a faster solve pay more.']],
+  'game-05': [['Look', 'The bed is covered. Only some of it is going to Durban.'], ['Pack', 'Tap what you actually need, or drag it into the suitcase.'], ['Careful', 'Pack the wrong thing and it gets rejected at the border. −150 each.'], ['Score', 'Clean pack plus speed. The clock starts when you do.']],
+  'game-07': [['Guess', 'The braai is ready some time between 19:00 and 23:00.'], ['Nudge', 'Use the buttons to set a time, then lock it in.'], ['Listen', 'The uncles tell you earlier or later. It’s usually later.'], ['Score', 'Up to 400 for asking. The longer you wait, the less the braai respects you.']],
+  'game-08': [['Watch', 'Forks close in on the bunny from every side.'], ['Tap', 'Tap a fork to confiscate it before it reaches the bunny.'], ['Speed', 'More forks, faster, the longer you last.'], ['Score', 'No clock. 20 a fork, up to 1,000. One fork gets through and the shift ends.']],
+  'game-11': [['Flip', 'Sixteen cards face down: eight words, eight meanings.'], ['Match', 'Flip two. Word plus its meaning is a pair. Anything else flips back.'], ['Careful', 'Each wrong pair costs 10.'], ['Score', '400 for clearing the board, plus a bonus for speed.']],
+  'game-12': [['Read', 'Eight clues. They give the meaning, not the word.'], ['Find', 'Drag across a word, or tap its first letter then its last. Any direction.'], ['Daily', 'New letters at midnight. One go a day.'], ['Score', '100 a word, plus a speed bonus if you find all eight.']],
+  'game-13': [['Fill', 'A mini crossword. Tap a square, type your answers.'], ['Hand in', 'Wrong letters only show when you hand it in. Each one costs 25.'], ['Daily', 'New crossword at midnight. One go a day.'], ['Score', '700, plus a bonus for speed, minus wrong letters.']],
+};
+function HowCards({ id }) {
+  const h = HOW[id]; if (!h) return null;
+  return <ul className="ng-rules how-rules">{h.map(([k, v]) => <li key={k}><span className="lbl blue">{k}</span><span>{v}</span></li>)}</ul>;
+}
+// One-screen How to play: shown over the game the first time you open it, then behind the [ ? ] next to the title.
+const HOW_SHORT = {
+  'game-02': ['Five vaalies are hiding on a Durban beach, in writing.', 'Tap the giveaway, not the person. Socks with sandals, that sort of thing.', 'False reports cost 100. So does dawdling.'],
+  'game-03': ['A statement about Durban. True or false?', 'Hit No laka for yes. Yes, really. Eish, no for no.', '45 seconds. The clock does not wait for vaalies.'],
+  'game-04': ['Five letters, six tries, one word a day.', 'Orange: right spot. Highlighted: wrong spot. Grey: not in it.', 'It draws from the whole coast, not just the syllabus.'],
+  'game-05': ['The bed is covered. Only some of it is going to Durban.', 'Tap what you need, or drag it into the suitcase.', 'Pack a puffer jacket and customs will have words.'],
+  'game-07': ['The braai is ready some time between 19:00 and 23:00.', 'Set a time, lock it in. The uncles say earlier or later.', 'It’s later. It’s always later.'],
+  'game-08': ['Forks are closing in on the bunny.', 'Tap them before they land. They come faster the longer you last.', 'The shift ends when a fork gets through. Gateway believes in you.'],
+  'game-09': ['Drag the duck left and right. Anywhere on the sky works.', 'Dodge the work. Grab anything that smells like holiday.', 'Three wobbles and you’re grounded. No cap on the score.'],
+  'game-14': ['The sun is cooking your cooler box.', 'Ice whatever’s hottest. Prawns first. Always prawns first.', 'Shoo the seagulls, slap the small hands, last as long as you can.'],
+  'game-11': ['Sixteen cards: eight words, eight meanings.', 'Flip two. Match the word to what it means.', 'Wrong pairs cost 10. Speed pays.'],
+  'game-12': ['Eight words, lost in the letters. The clues give the meaning, not the word.', 'Drag across a word, or tap its first letter then its last. Any direction, even backwards. Like Joburg traffic.', 'One go a day.'],
+  'game-13': ['A mini crossword for a long chair.', 'Tap a square, type. Wrong letters only show when you hand it in.', 'One go a day. Coffee optional.'],
+  'game-15': ['Fill the gap with the worst card in your hand.', 'The auntie picks a winner. She is not consistent.', 'First to four. Honour only, no marks.'],
+};
+const howSeen = () => { try { return JSON.parse(localStorage.getItem('lsd2-how-seen')) || []; } catch (e) { return []; } };
+function HowTo({ id, title, onClose }) {
+  const h = HOW_SHORT[id];
+  React.useEffect(() => { const k = e => { if (e.key === 'Escape') onClose(); }; addEventListener('keydown', k); return () => removeEventListener('keydown', k); }, []);
+  if (!h) return null;
+  return (
+    <div className="how-ov lt-in" role="dialog" aria-modal="true" aria-label={'How to play ' + title}>
+      <span className="lbl blue">How to play · {title}</span>
+      <div className="how-lines">{h.map((t, i) => <p key={i} className={i ? '' : 'hl'}>{t}</p>)}</div>
+      <button type="button" className="btn primary" onClick={onClose} autoFocus>[ Got it ]</button>
+      <span className="lbl muted">Forgot already? The [ ? ] next to the title brings this back.</span>
+    </div>
+  );
+}
+function GameGate({ kicker, title, line, cta, onStart, id, note, clockNote }) {
+  return (
+    <div className="gm-center">
+      <span className="lbl blue">{kicker}</span>
+      <div className="hl" style={{ fontSize: 'clamp(44px, 6vw, 88px)' }}>{title}</div>
+      <p className="lead" style={{ textAlign: 'center', margin: 0, maxWidth: 'calc(var(--lead-mw-c) * .933)' }}>{line}</p>
+      <HowCards id={id} />
+      {note && <span className="lbl muted" style={{ maxWidth: 560 }}>{note}</span>}
+      <button type="button" className="btn primary" onClick={onStart}>{cta}</button>
+      <span className="lbl muted">{clockNote || 'The clock starts when you press it. No peeking first.'}</span>
+      <ChallengeBtn id={id} />
+    </div>
+  );
+}
+// The way out. Quiet on purpose: a last resort, not an option. Confirms inline, once.
+function RevealBtn({ id, onReveal, daily }) {
+  const [ask, setAsk] = React.useState(false);
+  if (!ask) return <button type="button" className="btn rv" onClick={() => setAsk(true)}>[ Reveal it · 0 marks ]</button>;
+  return (
+    <div className="rv-ask lt-in" role="group" aria-label="Reveal the answer">
+      <span>{'Sure? Revealing scores zero and the ' + (daily ? 'day' : 'round') + ' still counts.'}</span>
+      <div className="row" style={{ gap: 8 }}>
+        <button type="button" className="btn line sm" onClick={() => { ltsdEvent('reveal', { game: id }); setAsk(false); onReveal(); }}>[ Show me ]</button>
+        <button type="button" className="btn primary sm" onClick={() => setAsk(false)} autoFocus>[ I’ll suffer on ]</button>
+      </div>
+    </div>
+  );
+}
+const speedF = (secs, full, zero) => Math.max(0, Math.min(1, (zero - secs) / (zero - full)));
+const speedMult = (secs, full, zero) => 0.7 + 0.3 * speedF(secs, full, zero);
+const clockFmt = s => Math.floor(s / 60) + ':' + pad2(Math.floor(s % 60));
+const speedLine = (secs, full, zero) => ' Time ' + clockFmt(secs) + ', speed ×' + speedMult(secs, full, zero).toFixed(2) + '.';
+
+// share: extra result fields for the share text + card (false = the game places its own ShareRow, e.g. under Durdle's card).
+// revealed = { answer, plural }: the player used Reveal. Zero marks, nothing filed to the Class Rankings, card says REVEALED.
+// again = [label, onClick]: the replay button. One result screen per game: score, slip, share, play again, back to games — all here.
+// more = extra buttons for the action row. Actions show unless the game places its own share row (share === false) and has no replay.
+// seen = a finished daily, reopened: nothing new is filed and the banner says so.
+function ScoreBanner({ id, pts, line, share, revealed, again, more, seen }) {
+  const acts = (again || more || share !== false) && <div className="row sb-acts">{again && <button type="button" className="btn primary" onClick={again[1]}>{again[0]}</button>}{more}<a className="btn line" href="#activities">Back to games</a></div>;
+  const v = ptsClamp(pts, id);
+  // File the round FIRST (once, during the first render), so the Class Rankings position below already includes it.
+  const [filed] = React.useState(() => { const prev = readPoints()[id] || 0; if (!revealed && !seen) awardGame(id, v); return { prev }; });
+  const prev = filed.prev;
+  const isBest = v > prev;
+  const { you, total, empty } = useBoard();
+  if (revealed) return (
+    <div className="sb-wrap">
+    <div className="sb">
+      <div className="sb-l">
+        <span className="lbl blue">Revealed · 0 marks</span>
+        <div className="hl sb-n">0 <Sel>marks.</Sel></div>
+        <span className="sb-rv">{(revealed.plural ? 'The answers were ' : 'The answer was ') + revealed.answer + '. Knowing isn’t the same as learning, ekse.'}</span>
+      </div>
+      <a className="sb-r" href="#leaderboard"><span className="lbl muted">Class Rankings</span><span className="hl sb-rank">{lbPos(you)}</span><span className="lbl">Not filed · see it</span></a>
+    </div>
+    {share !== false && <ShareRow id={id} r={{ ...(share || {}), revealed: true, pts: 0, kicker: 'Revealed' }} />}
+    {acts}
+    </div>
+  );
+  return (
+    <div className="sb-wrap">
+    <div className="sb">
+      <div className="sb-l">
+        <span className="lbl blue">{seen ? 'Done for today · your best: ' + ptsFmt(Math.max(v, prev)) : isBest ? (prev ? 'New personal best · +' + ptsFmt(v - prev) + ' on the board' : 'First marks, filed') : !v ? 'This round: 0. ' + (id === 'game-09' ? 'The duck has seen worse.' : 'Gateway has seen worse.') + (prev ? ' Your best: ' + ptsFmt(prev) + '.' : '') : 'This round: ' + ptsFmt(v) + ' · your best (' + ptsFmt(prev) + ') still counts'}</span>
+        <div className="hl sb-n">{ptsFmt(v) + ' '}<Sel>marks.</Sel></div>
+        <span className="lbl muted">{line || (seen ? 'Filed. Back at midnight.' : isBest ? 'Gateway has updated your file.' : 'Only your best goes on the board. Beat ' + ptsFmt(prev) + ' to climb.')}</span>
+      </div>
+      <a className="sb-r" href="#leaderboard"><span className="lbl muted">Class Rankings</span><span className="hl sb-rank">{lbPos(you)}</span><span className="lbl">{lbOf(you, total) + ' · see it'}</span></a>
+    </div>
+    {share !== false && <ShareRow id={id} r={{ pts: v, kicker: isBest || seen ? 'Personal best' : 'Result slip', ...(share || {}) }} />}
+    {acts}
+    </div>
+  );
+}
+
+function LbRow({ r }) {
+  return <div className={'lb-row' + (r.you ? ' you' : '') + (r.pos <= 3 ? ' podium' : '')}>
+    <span className="lb-pos">{r.pos ? pad2(r.pos) : '—'}</span>
+    <span className="lb-name">{r.you ? <Sel>{r.name}</Sel> : r.name}<span className="lbl muted lb-from">{r.from}</span>{r.tag && <span className="lbl blue lb-from">{r.tag}</span>}</span>
+    <span className="lb-pts">{ptsFmt(r.pts)}</span>
+  </div>;
+}
+const lbKicker = m => m === 'live' ? ' The board refreshes every 15 seconds.' : '';
+const LB_EMPTY = 'The board is empty. Dezemba is coming. Someone has to be first — might as well be you.';
+// Position readouts that never assume a crowd: “—” until you have marks, and no “of N” until there is an N worth quoting.
+const lbPos = you => you && you.pos ? '#' + you.pos : '—';
+const lbOf = (you, total) => total > 1 ? 'of ' + ptsFmt(total) : you && you.pos ? 'first on the board' : 'not on the board yet';
+const lbAheadLine = (you, ahead) => !you || !you.pts ? LB_EMPTY : ahead ? ptsFmt(ahead.pts - you.pts + 1) + ' marks to pass ' + ahead.name + (ahead.from ? ' from ' + ahead.from : '') + '.' : 'First place. Gateway is informing your manager.';
+
+function MiniBoard() {
+  const { top, you, total, ahead, empty } = useBoard();
+  return (
+    <div className="mb">
+      <div className="card lb-board">
+        <div className="between lbl" style={{ padding: '10px 14px 12px', borderBottom: '1px solid var(--border-faint)', marginBottom: 6 }}><span className="blue">Class Rankings</span><a href="#leaderboard" className="lbl">See the board</a></div>
+        {empty ? <div className="lk-d" style={{ padding: '10px 14px' }}>{LB_EMPTY}</div> : top.slice(0, 3).map(r => <LbRow key={r.id} r={r} />)}
+        {!empty && you.pos > 3 && <><div className="lb-gap lbl muted">· · ·</div><LbRow r={you} /></>}
+      </div>
+      <div className="card lb-me">
+        <div className="between lbl" style={{ flexWrap: 'wrap', rowGap: 4 }}><span className="blue">Your position</span><span className="muted">{lbOf(you, total)}</span></div>
+        <div className="hl lb-big"><Sel>{lbPos(you)}</Sel></div>
+        <div className="between lbl"><span className="muted">Your marks</span><span>{ptsFmt(you.pts)}</span></div>
+        <div className="lk-d">{lbAheadLine(you, ahead)}</div>
+      </div>
+    </div>
+  );
+}
+
+// Games page header: your position, compact. Links to the full Class Rankings.
+function PosCard() {
+  const { you, total, ahead } = useBoard();
+  const live = lbAheadLine(you, ahead);
+  return (
+    <a className="card lb-me pos-c" href="#leaderboard" aria-label={(you.pos ? 'Your position: number ' + you.pos + (total > 1 ? ' of ' + ptsFmt(total) : '') : 'Not on the board yet') + '. Open the Class Rankings.'}>
+      <div className="between lbl" style={{ flexWrap: 'wrap', rowGap: 4 }}><span className="blue">Your position</span><span className="muted">{lbOf(you, total)}</span></div>
+      <div className="pos-c-m"><span className="hl pos-c-n"><Sel>{lbPos(you)}</Sel></span><span className="pos-c-p"><b>{ptsFmt(you.pts)}</b><span className="lbl muted">marks</span></span></div>
+      <div key={live} className="lbl muted pos-c-l lt-in">{live}</div>
+      <span className="lbl blue pos-c-go">Class Rankings →</span>
+    </a>
+  );
+}
+
+// Class Rankings. Empty board: the header as normal, then the empty state and a way in. One entry or more: the real rows + Your position.
+function LeaderboardScreen() {
+  const { mode, top, near, you, ahead, points, feed, total, empty } = useBoard();
+  const gap = near.length ? Math.max(0, (near[0].pos || 0) - top.length - 1) : 0;
+  return (
+    <div>
+      <PageHead index="12" kicker={lbKicker(mode)} title="Class Rankings">
+        <p className="lead" style={{ margin: 0 }}>Every student, ranked by marks from the games. Your best in each game counts.{lbKicker(mode)}</p>
+      </PageHead>
+      {empty ? (
+        <div className="card lb-board lb-empty">
+          <span className="hl">The board is <Sel>empty.</Sel></span>
+          <p className="lead" style={{ margin: 0 }}>Dezemba is coming. Someone has to be first — might as well be you.</p>
+          <a className="btn primary" href="#activities">[ Play something ]</a>
+        </div>
+      ) : (
+        <div className="lb">
+          <div className="card lb-board">
+            <div className="lb-head lbl"><span>Pos</span><span>Student</span><span style={{ textAlign: 'right' }}>Marks</span></div>
+            {top.map(r => <LbRow key={r.id} r={r} />)}
+            {near.length > 0 && <>{gap > 0 && <div className="lb-gap lbl muted">{'· · · ' + ptsFmt(gap) + (gap === 1 ? ' student later · · ·' : ' students later · · ·')}</div>}{near.map(r => <LbRow key={r.id} r={r} />)}</>}
+          </div>
+          <div className="lb-side">
+            <div className="card lb-me">
+              <div className="between lbl" style={{ flexWrap: 'wrap', rowGap: 4 }}><span className="blue">Your position</span><span className="muted">{lbOf(you, total)}</span></div>
+              <div className="hl lb-big"><Sel>{lbPos(you)}</Sel></div>
+              <div className="lk-d">{lbAheadLine(you, ahead)}</div>
+              <div className="lb-games">{PT_GAMES.map(id => <a key={id} href={'#activities/' + id} className="lb-g"><span>{PT_RULES[id][0]}</span><b>{points[id] ? ptsFmt(points[id]) : '—'}</b></a>)}</div>
+              <a className="btn primary" href="#activities">[ Earn marks ]</a>
+            </div>
+            {mode === 'live' && feed.length > 0 && <div className="card lb-feed">
+              <div className="between lbl"><span className="blue">Latest marks</span></div>
+              {feed.map((f, k) => <div key={k} className="lb-f"><b>{f.name}</b>{(f.from ? ' from ' + f.from : '') + ' got ' + ptsFmt(f.add) + ' in ' + f.g + '.'}</div>)}
+            </div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+Object.assign(window, { PosCard, HowTo, HOW_SHORT, howSeen, GameGate, HowCards, useGameClock, speedF, speedMult, clockFmt, speedLine, pointsTotal, PT_TOTAL, PT_GAMES, PT_RULES, ptsFmt, ptsClamp, readPoints, awardGame, useBoard, ScoreBanner, MiniBoard, LeaderboardScreen });
